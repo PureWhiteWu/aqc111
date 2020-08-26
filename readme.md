@@ -26,7 +26,7 @@ Currently I only confirmed QNAP QNA-UC5G1T works. If you got other products and 
 * [QNAP QNA-UC5G1T](https://amzn.to/2A2aI1e) (Type-A, confirmed working)
 * [TRENDnet TUC-ET5G](https://amzn.to/314DASp) (Type-C)
 * [StarTech.com US5GC30](https://amzn.to/3hGuNOQ) (Type-C)
-* [Sonnet Solo5G] (https://amzn.to/3b1b5Lh) (Type-A/C)
+* [Sonnet Solo5G](https://amzn.to/3b1b5Lh) (Type-A/C)
 
 ## How to install
 
