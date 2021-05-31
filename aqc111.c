@@ -21,7 +21,7 @@
 #include "aq_compat.h"
 #include "aqc111.h"
 
-#define DRIVER_VERSION "1.3.3.0"
+#define DRIVER_VERSION "1.3.3.1"
 #define DRIVER_NAME "aqc111"
 
 static int aqc111_read_cmd_nopm(struct usbnet *dev, u8 cmd, u16 value,
