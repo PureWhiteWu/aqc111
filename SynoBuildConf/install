@@ -36,6 +36,8 @@ create_spk(){
 	./INFO.sh > INFO
 	cp INFO $PKG_DIR/INFO
 
+	cp -av conf $PKG_DIR
+
 	### Create the final spk.
 	# pkg_make_spk <source path> <dest path> <spk file name>
 	# Please put the result spk into /image/packages
