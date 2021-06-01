@@ -7,7 +7,6 @@
  * Copyright (C) 2018 Aquantia Corp.
  */
 
-#include <linux/version.h>
 #include <linux/module.h>
 #include <linux/netdevice.h>
 #include <linux/ethtool.h>
@@ -16,12 +15,11 @@
 #include <linux/crc32.h>
 #include <linux/if_vlan.h>
 #include <linux/usb/cdc.h>
-#include <linux/workqueue.h>
+#include <linux/usb/usbnet.h>
+#include <linux/linkmode.h>
 
-#include "aq_compat.h"
 #include "aqc111.h"
 
-#define DRIVER_VERSION "1.3.3.1"
 #define DRIVER_NAME "aqc111"
 
 static int aqc111_read_cmd_nopm(struct usbnet *dev, u8 cmd, u16 value,
@@ -195,71 +193,6 @@ static int aqc111_write16_cmd_async(struct usbnet *dev, u8 cmd, u16 value,
 				      sizeof(tmp), &tmp);
 }
 
-static int aqc111_mdio_read(struct usbnet *dev, u16 value, u16 index, u16 *data)
-{
-	return aqc111_read16_cmd(dev, AQ_PHY_CMD, value, index, data);
-}
-
-static int aqc111_mdio_write(struct usbnet *dev, u16 value,
-			     u16 index, u16 *data)
-{
-	return aqc111_write16_cmd(dev, AQ_PHY_CMD, value, index, data);
-}
-
-#if KERNEL_VERSION(4, 6, 0) > LINUX_VERSION_CODE
-static int aqc111_get_settings(struct net_device *net, struct ethtool_cmd *cmd)
-{
-	struct usbnet *dev = netdev_priv(net);
-	struct aqc111_data *aqc111_data = dev->driver_priv;
-	struct mii_if_info *mii = &dev->mii;
-	u32 speed = SPEED_UNKNOWN;
-
-	cmd->supported =
-		(SUPPORTED_100baseT_Full |
-		 SUPPORTED_1000baseT_Full |
-		 SUPPORTED_Autoneg | SUPPORTED_TP | SUPPORTED_MII);
-
-	/* only supports twisted-pair */
-	cmd->port = PORT_MII;
-
-	/* only supports internal transceiver */
-	cmd->transceiver = XCVR_INTERNAL;
-
-	/* this isn't fully supported at higher layers */
-	cmd->phy_address = mii->phy_id;
-	cmd->mdio_support = 0x00; /*Not supported*/
-
-	cmd->advertising =
-		(ADVERTISED_100baseT_Full |
-		 ADVERTISED_1000baseT_Full |
-		 ADVERTISED_Autoneg | ADVERTISED_TP | ADVERTISED_MII);
-
-	cmd->autoneg = aqc111_data->autoneg;
-
-	switch (aqc111_data->link_speed) {
-	case AQ_INT_SPEED_5G:
-		speed = SPEED_5000;
-		break;
-	case AQ_INT_SPEED_2_5G:
-		speed = SPEED_2500;
-		break;
-	case AQ_INT_SPEED_1G:
-		speed = SPEED_1000;
-		break;
-	case AQ_INT_SPEED_100M:
-		speed = SPEED_100;
-		break;
-	}
-	cmd->duplex = DUPLEX_FULL;
-
-	ethtool_cmd_speed_set(cmd, speed);
-
-	mii->full_duplex = cmd->duplex;
-
-	return 0;
-}
-#endif
-
 static void aqc111_get_drvinfo(struct net_device *net,
 			       struct ethtool_drvinfo *info)
 {
@@ -269,7 +202,6 @@ static void aqc111_get_drvinfo(struct net_device *net,
 	/* Inherit standard device info */
 	usbnet_get_drvinfo(net, info);
 	strlcpy(info->driver, DRIVER_NAME, sizeof(info->driver));
-	strlcpy(info->version, DRIVER_VERSION, sizeof(info->version));
 	snprintf(info->fw_version, sizeof(info->fw_version), "%u.%u.%u",
 		 aqc111_data->fw_ver.major,
 		 aqc111_data->fw_ver.minor,
@@ -307,221 +239,10 @@ static int aqc111_set_wol(struct net_device *net,
 	return 0;
 }
 
-static const char aqc111_priv_flag_names[][ETH_GSTRING_LEN] = {
-	"Low Power 5G",
-	"Thermal throttling",
-};
-
-static void aqc111_get_strings(struct net_device *net, u32 stringset, u8 *data)
-{
-	switch (stringset) {
-	case  ETH_SS_PRIV_FLAGS:
-		memcpy(data, aqc111_priv_flag_names,
-		       sizeof(aqc111_priv_flag_names));
-		break;
-	}
-}
-
-static u32 aqc111_get_priv_flags(struct net_device *net)
-{
-	struct usbnet *dev = netdev_priv(net);
-	struct aqc111_data *aqc111_data = dev->driver_priv;
-
-	return aqc111_data->priv_flags;
-}
-
-static void aqc111_set_phy_speed_fw_iface(struct usbnet *dev,
-					  struct aqc111_data *aqc111_data)
-{
-	aqc111_write32_cmd(dev, AQ_PHY_OPS, 0, 0, &aqc111_data->phy_cfg);
-}
-
-static void aqc111_set_phy_speed_direct(struct usbnet *dev,
-					struct aqc111_data *aqc111_data)
-{
-	u16 reg16_1 = 0;
-	u16 reg16_2 = 0;
-	u16 reg16_3 = 0;
-
-	/* Disable auto-negotiation */
-	reg16_1 = AQ_ANEG_EX_PAGE_CTRL;
-	aqc111_mdio_write(dev, AQ_AUTONEG_STD_CTRL_REG, AQ_PHY_AUTONEG_ADDR,
-			  &reg16_1);
-
-	reg16_1 = AQ_ANEG_EX_PHY_ID | AQ_ANEG_ADV_AQRATE;
-	if (aqc111_data->phy_cfg & AQ_DOWNSHIFT) {
-		reg16_1 |= AQ_ANEG_EN_DSH;
-		reg16_1 |= (aqc111_data->phy_cfg & AQ_DSH_RETRIES_MASK) >>
-			    AQ_DSH_RETRIES_SHIFT;
-	}
-
-	reg16_2 = AQ_ANEG_ADV_LT;
-	if (aqc111_data->phy_cfg & AQ_PAUSE)
-		reg16_3 |= AQ_ANEG_PAUSE;
-
-	if (aqc111_data->phy_cfg & AQ_ASYM_PAUSE)
-		reg16_3 |= AQ_ANEG_ASYM_PAUSE;
-
-	if (aqc111_data->phy_cfg & AQ_ADV_5G) {
-		reg16_1 |= AQ_ANEG_ADV_5G_N;
-		reg16_2 |= AQ_ANEG_ADV_5G_T;
-	}
-	if (aqc111_data->phy_cfg & AQ_ADV_2G5) {
-		reg16_1 |= AQ_ANEG_ADV_2G5_N;
-		reg16_2 |= AQ_ANEG_ADV_2G5_T;
-	}
-	if (aqc111_data->phy_cfg & AQ_ADV_1G)
-		reg16_1 |= AQ_ANEG_ADV_1G;
-
-	if (aqc111_data->phy_cfg & AQ_ADV_100M)
-		reg16_3 |= AQ_ANEG_100M;
-
-	aqc111_mdio_write(dev, AQ_AUTONEG_VEN_PROV1_REG,
-			  AQ_PHY_AUTONEG_ADDR, &reg16_1);
-	aqc111_mdio_write(dev, AQ_AUTONEG_10GT_CTRL_REG,
-			  AQ_PHY_AUTONEG_ADDR, &reg16_2);
-
-	aqc111_mdio_read(dev, AQ_GLB_SYS_CFG_REG_5G, AQ_PHY_GLOBAL_ADDR,
-			 &reg16_1);
-	reg16_1 &= ~AQ_SERDES_MODE_MASK;
-	if (aqc111_data->phy_cfg & AQ_XFI_DIV_2)
-		reg16_1 |= AQ_SERDES_MODE_XFI_DIV_2;
-	else
-		reg16_1 |= AQ_SERDES_MODE_XFI;
-
-	aqc111_mdio_write(dev, AQ_GLB_SYS_CFG_REG_5G, AQ_PHY_GLOBAL_ADDR,
-			  &reg16_1);
-
-	aqc111_mdio_read(dev, AQ_AUTONEG_ADV_REG, AQ_PHY_AUTONEG_ADDR,
-			 &reg16_1);
-	reg16_1 &= ~AQ_ANEG_ABILITY_MASK;
-	reg16_1 |= reg16_3;
-	aqc111_mdio_write(dev, AQ_AUTONEG_ADV_REG, AQ_PHY_AUTONEG_ADDR,
-			  &reg16_1);
-
-	/* Restart auto-negotiation */
-	reg16_1 = AQ_ANEG_EX_PAGE_CTRL | AQ_ANEG_EN_ANEG |
-		  AQ_ANEG_RESTART_ANEG;
-
-	aqc111_mdio_write(dev, AQ_AUTONEG_STD_CTRL_REG,
-			  AQ_PHY_AUTONEG_ADDR, &reg16_1);
-}
-
-static void aqc111_set_phy_speed(struct usbnet *dev, u8 autoneg, u16 speed)
-{
-	struct aqc111_data *aqc111_data = dev->driver_priv;
-
-	aqc111_data->phy_cfg &= ~AQ_ADV_MASK;
-	aqc111_data->phy_cfg |= AQ_PAUSE;
-	aqc111_data->phy_cfg |= AQ_ASYM_PAUSE;
-	aqc111_data->phy_cfg |= AQ_DOWNSHIFT;
-	aqc111_data->phy_cfg &= ~AQ_DSH_RETRIES_MASK;
-	aqc111_data->phy_cfg |= (3 << AQ_DSH_RETRIES_SHIFT) &
-				AQ_DSH_RETRIES_MASK;
-
-	aqc111_data->phy_cfg &= ~AQ_XFI_DIV_2;
-	if (aqc111_data->priv_flags & AQ_PF_XFI_DIV_2)
-		aqc111_data->phy_cfg |= AQ_XFI_DIV_2;
-
-	if (autoneg == AUTONEG_ENABLE) {
-		switch (speed) {
-		case SPEED_5000:
-			aqc111_data->phy_cfg |= AQ_ADV_5G;
-			/* fall-through */
-		case SPEED_2500:
-			aqc111_data->phy_cfg |= AQ_ADV_2G5;
-			/* fall-through */
-		case SPEED_1000:
-			aqc111_data->phy_cfg |= AQ_ADV_1G;
-			/* fall-through */
-		case SPEED_100:
-			aqc111_data->phy_cfg |= AQ_ADV_100M;
-			/* fall-through */
-		}
-	} else {
-		switch (speed) {
-		case SPEED_5000:
-			aqc111_data->phy_cfg |= AQ_ADV_5G;
-			break;
-		case SPEED_2500:
-			aqc111_data->phy_cfg |= AQ_ADV_2G5;
-			break;
-		case SPEED_1000:
-			aqc111_data->phy_cfg |= AQ_ADV_1G;
-			break;
-		case SPEED_100:
-			aqc111_data->phy_cfg |= AQ_ADV_100M;
-			break;
-		}
-	}
-
-	if (aqc111_data->dpa)
-		aqc111_set_phy_speed_direct(dev, aqc111_data);
-	else
-		aqc111_set_phy_speed_fw_iface(dev, aqc111_data);
-}
-
-static int aqc111_update_thermal_params(struct usbnet *dev)
-{
-	struct aqc111_data *aqc111_data = dev->driver_priv;
-	struct aqc111_thermal_params therm_params = {};
-
-	therm_params.enable = (aqc111_data->priv_flags & AQ_PF_THERMAL) ? 1 : 0;
-	therm_params.threshold_critical = AQ_CRITICAL_TEMP_THRESHOLD;
-	therm_params.threshold_high = AQ_HIGH_TEMP_THRESHOLD;
-	therm_params.threshold_normal = AQ_NORMAL_TEMP_THRESHOLD;
-	therm_params.phy_speed_mask = AQ_ADV_100M;
-	return aqc111_write_cmd(dev, AQ_PHY_THERMAL, 0, 0,
-				sizeof(struct aqc111_thermal_params),
-				&therm_params);
-}
-
-static int aqc111_set_priv_flags(struct net_device *net, u32 flags)
-{
-	struct usbnet *dev = netdev_priv(net);
-	struct aqc111_data *aqc111_data = dev->driver_priv;
-	u32 changed;
-
-	if (flags & ~AQ_PRIV_FLAGS_MASK)
-		return -EOPNOTSUPP;
-
-	changed = aqc111_data->priv_flags^flags;
-	aqc111_data->priv_flags = flags;
-
-	if (!(aqc111_data->phy_cfg & AQ_LOW_POWER) &&
-	    (aqc111_data->phy_cfg & AQ_PHY_POWER_EN)) {
-		if (changed & AQ_PF_XFI_DIV_2) {
-			aqc111_set_phy_speed(dev, aqc111_data->autoneg,
-					     aqc111_data->advertised_speed);
-		}
-	}
-	if (changed & AQ_PF_THERMAL)
-		aqc111_update_thermal_params(dev);
-
-	return 0;
-}
-
-static int aqc111_get_sset_count(struct net_device *net, int stringset)
-{
-	int ret = 0;
-
-	switch (stringset) {
-	case ETH_SS_PRIV_FLAGS:
-		ret = ARRAY_SIZE(aqc111_priv_flag_names);
-		break;
-	default:
-		ret = -EOPNOTSUPP;
-	}
-
-	return ret;
-}
-
-#if KERNEL_VERSION(4, 6, 0) <= LINUX_VERSION_CODE
 static void aqc111_speed_to_link_mode(u32 speed,
 				      struct ethtool_link_ksettings *elk)
 {
 	switch (speed) {
-#if KERNEL_VERSION(4, 10, 0) <= LINUX_VERSION_CODE
 	case SPEED_5000:
 		ethtool_link_ksettings_add_link_mode(elk, advertising,
 						     5000baseT_Full);
@@ -530,7 +251,6 @@ static void aqc111_speed_to_link_mode(u32 speed,
 		ethtool_link_ksettings_add_link_mode(elk, advertising,
 						     2500baseT_Full);
 		break;
-#endif
 	case SPEED_1000:
 		ethtool_link_ksettings_add_link_mode(elk, advertising,
 						     1000baseT_Full);
@@ -555,21 +275,17 @@ static int aqc111_get_link_ksettings(struct net_device *net,
 					     100baseT_Full);
 	ethtool_link_ksettings_add_link_mode(elk, supported,
 					     1000baseT_Full);
-#if KERNEL_VERSION(4, 10, 0) <= LINUX_VERSION_CODE
 	if (usb_speed == USB_SPEED_SUPER) {
 		ethtool_link_ksettings_add_link_mode(elk, supported,
 						     2500baseT_Full);
 		ethtool_link_ksettings_add_link_mode(elk, supported,
 						     5000baseT_Full);
 	}
-#endif
 	ethtool_link_ksettings_add_link_mode(elk, supported, TP);
 	ethtool_link_ksettings_add_link_mode(elk, supported, Autoneg);
 
 	elk->base.port = PORT_TP;
-#if KERNEL_VERSION(4, 14, 0) <= LINUX_VERSION_CODE
 	elk->base.transceiver = XCVR_INTERNAL;
-#endif
 
 	elk->base.mdio_support = 0x00; /*Not supported*/
 
@@ -600,27 +316,63 @@ static int aqc111_get_link_ksettings(struct net_device *net,
 
 	return 0;
 }
-#endif
 
-#if KERNEL_VERSION(4, 6, 0) <= LINUX_VERSION_CODE
+static void aqc111_set_phy_speed(struct usbnet *dev, u8 autoneg, u16 speed)
+{
+	struct aqc111_data *aqc111_data = dev->driver_priv;
+
+	aqc111_data->phy_cfg &= ~AQ_ADV_MASK;
+	aqc111_data->phy_cfg |= AQ_PAUSE;
+	aqc111_data->phy_cfg |= AQ_ASYM_PAUSE;
+	aqc111_data->phy_cfg |= AQ_DOWNSHIFT;
+	aqc111_data->phy_cfg &= ~AQ_DSH_RETRIES_MASK;
+	aqc111_data->phy_cfg |= (3 << AQ_DSH_RETRIES_SHIFT) &
+				AQ_DSH_RETRIES_MASK;
+
+	if (autoneg == AUTONEG_ENABLE) {
+		switch (speed) {
+		case SPEED_5000:
+			aqc111_data->phy_cfg |= AQ_ADV_5G;
+			fallthrough;
+		case SPEED_2500:
+			aqc111_data->phy_cfg |= AQ_ADV_2G5;
+			fallthrough;
+		case SPEED_1000:
+			aqc111_data->phy_cfg |= AQ_ADV_1G;
+			fallthrough;
+		case SPEED_100:
+			aqc111_data->phy_cfg |= AQ_ADV_100M;
+			/* fall-through */
+		}
+	} else {
+		switch (speed) {
+		case SPEED_5000:
+			aqc111_data->phy_cfg |= AQ_ADV_5G;
+			break;
+		case SPEED_2500:
+			aqc111_data->phy_cfg |= AQ_ADV_2G5;
+			break;
+		case SPEED_1000:
+			aqc111_data->phy_cfg |= AQ_ADV_1G;
+			break;
+		case SPEED_100:
+			aqc111_data->phy_cfg |= AQ_ADV_100M;
+			break;
+		}
+	}
+
+	aqc111_write32_cmd(dev, AQ_PHY_OPS, 0, 0, &aqc111_data->phy_cfg);
+}
+
 static int aqc111_set_link_ksettings(struct net_device *net,
 				     const struct ethtool_link_ksettings *elk)
-#else
-static int aqc111_set_settings(struct net_device *net, struct ethtool_cmd *cmd)
-#endif
 {
 	struct usbnet *dev = netdev_priv(net);
 	struct aqc111_data *aqc111_data = dev->driver_priv;
 	enum usb_device_speed usb_speed = dev->udev->speed;
-#if KERNEL_VERSION(4, 6, 0) <= LINUX_VERSION_CODE
 	u8 autoneg = elk->base.autoneg;
 	u32 speed = elk->base.speed;
-	u8 duplex = elk->base.duplex;
-#else
-	u16 speed = ethtool_cmd_speed(cmd);
-	u8 autoneg = cmd->autoneg;
-	u8 duplex = cmd->duplex;
-#endif
+
 	if (autoneg == AUTONEG_ENABLE) {
 		if (aqc111_data->autoneg != AUTONEG_ENABLE) {
 			aqc111_data->autoneg = AUTONEG_ENABLE;
@@ -635,20 +387,14 @@ static int aqc111_set_settings(struct net_device *net, struct ethtool_cmd *cmd)
 		    speed != SPEED_1000 &&
 		    speed != SPEED_2500 &&
 		    speed != SPEED_5000 &&
-		    speed != SPEED_UNKNOWN){
-			printk("returned einval at %s:%d", __FILE__, __LINE__);
+		    speed != SPEED_UNKNOWN)
 			return -EINVAL;
-			}
 
-		if (duplex != DUPLEX_FULL){
-		    printk("returned einval at %s:%d", __FILE__, __LINE__);
+		if (elk->base.duplex != DUPLEX_FULL)
 			return -EINVAL;
-		}
 
-		if (usb_speed != USB_SPEED_SUPER && speed > SPEED_1000){
-		    printk("returned einval at %s:%d", __FILE__, __LINE__);
+		if (usb_speed != USB_SPEED_SUPER && speed > SPEED_1000)
 			return -EINVAL;
-		}
 
 		aqc111_data->autoneg = AUTONEG_DISABLE;
 		if (speed != SPEED_UNKNOWN)
@@ -662,24 +408,14 @@ static int aqc111_set_settings(struct net_device *net, struct ethtool_cmd *cmd)
 }
 
 static const struct ethtool_ops aqc111_ethtool_ops = {
-#if KERNEL_VERSION(4, 6, 0) > LINUX_VERSION_CODE
-	.get_settings = aqc111_get_settings,
-	.set_settings = aqc111_set_settings,
-#endif
 	.get_drvinfo = aqc111_get_drvinfo,
 	.get_wol = aqc111_get_wol,
 	.set_wol = aqc111_set_wol,
 	.get_msglevel = usbnet_get_msglevel,
 	.set_msglevel = usbnet_set_msglevel,
 	.get_link = ethtool_op_get_link,
-	.get_strings = aqc111_get_strings,
-	.get_priv_flags = aqc111_get_priv_flags,
-	.set_priv_flags = aqc111_set_priv_flags,
-	.get_sset_count = aqc111_get_sset_count,
-#if KERNEL_VERSION(4, 6, 0) <= LINUX_VERSION_CODE
 	.get_link_ksettings = aqc111_get_link_ksettings,
 	.set_link_ksettings = aqc111_set_link_ksettings
-#endif
 };
 
 static int aqc111_change_mtu(struct net_device *net, int new_mtu)
@@ -687,11 +423,6 @@ static int aqc111_change_mtu(struct net_device *net, int new_mtu)
 	struct usbnet *dev = netdev_priv(net);
 	u16 reg16 = 0;
 	u8 buf[5];
-
-#if KERNEL_VERSION(4, 10, 0) > LINUX_VERSION_CODE
-	if (new_mtu <= 0 || new_mtu > 16334)
-		return -EINVAL;
-#endif
 
 	net->mtu = new_mtu;
 	dev->hard_mtu = net->mtu + net->hard_header_len;
@@ -706,7 +437,7 @@ static int aqc111_change_mtu(struct net_device *net, int new_mtu)
 	aqc111_write16_cmd(dev, AQ_ACCESS_MAC, SFR_MEDIUM_STATUS_MODE,
 			   2, &reg16);
 
-	if (dev->net->mtu > 12500 && dev->net->mtu <= 16334) {
+	if (dev->net->mtu > 12500) {
 		memcpy(buf, &AQC111_BULKIN_SIZE[2], 5);
 		/* RX bulk configuration */
 		aqc111_write_cmd(dev, AQ_ACCESS_MAC, SFR_RX_BULKIN_QCTRL,
@@ -720,7 +451,7 @@ static int aqc111_change_mtu(struct net_device *net, int new_mtu)
 		reg16 = 0x1020;
 	else if (dev->net->mtu <= 12500)
 		reg16 = 0x1420;
-	else if (dev->net->mtu <= 16334)
+	else
 		reg16 = 0x1A20;
 
 	aqc111_write16_cmd(dev, AQ_ACCESS_MAC, SFR_PAUSE_WATERLVL_LOW,
@@ -910,13 +641,8 @@ static const struct net_device_ops aqc111_netdev_ops = {
 	.ndo_stop		= usbnet_stop,
 	.ndo_start_xmit		= usbnet_start_xmit,
 	.ndo_tx_timeout		= usbnet_tx_timeout,
-	.ndo_get_stats64	= usbnet_get_stats64,
-#if (RHEL_RELEASE_VERSION(7, 5) <= RHEL_RELEASE_CODE)
-	.extended.ndo_change_mtu = aqc111_change_mtu,
-	.ndo_size		= sizeof(const struct net_device_ops),
-#else
+	.ndo_get_stats64	= dev_get_tstats64,
 	.ndo_change_mtu		= aqc111_change_mtu,
-#endif
 	.ndo_set_mac_address	= aqc111_set_mac_addr,
 	.ndo_validate_addr	= eth_validate_addr,
 	.ndo_vlan_rx_add_vid	= aqc111_vlan_rx_add_vid,
@@ -953,8 +679,6 @@ static void aqc111_read_fw_version(struct usbnet *dev,
 
 	if (aqc111_data->fw_ver.major & 0x80)
 		aqc111_data->fw_ver.major &= ~0x80;
-	else
-		aqc111_data->dpa = 1;
 }
 
 static int aqc111_bind(struct usbnet *dev, struct usb_interface *intf)
@@ -964,9 +688,6 @@ static int aqc111_bind(struct usbnet *dev, struct usb_interface *intf)
 	struct aqc111_data *aqc111_data;
 	int ret;
 
-	/* Force switch to LAN config */
-	aqc111_write_cmd(dev, AQ_SWITCH_CONFIG, AQ_SW_CONFIG_MAGIC_KEY,
-			 AQ_SW_CONFIG_LAN, 0, NULL);
 	/* Check if vendor configuration */
 	if (udev->actconfig->desc.bConfigurationValue != 1) {
 		usb_driver_set_configuration(udev, 1);
@@ -1002,30 +723,24 @@ static int aqc111_bind(struct usbnet *dev, struct usb_interface *intf)
 	dev->net->needed_headroom += sizeof(u64);
 	dev->net->needed_tailroom += sizeof(u64);
 
-#if KERNEL_VERSION(4, 10, 0) <= LINUX_VERSION_CODE
 	dev->net->max_mtu = 16334;
-#elif (RHEL_RELEASE_VERSION(7, 5) <= RHEL_RELEASE_CODE)
-	dev->net->extended->max_mtu = 16334;
-#endif
 
 	dev->net->netdev_ops = &aqc111_netdev_ops;
 	dev->net->ethtool_ops = &aqc111_ethtool_ops;
 
-#if KERNEL_VERSION(3, 12, 0) <= LINUX_VERSION_CODE || (RHEL_RELEASE_CODE)
 	if (usb_device_no_sg_constraint(dev->udev))
 		dev->can_dma_sg = 1;
-#endif
 
 	dev->net->hw_features |= AQ_SUPPORT_HW_FEATURE;
 	dev->net->features |= AQ_SUPPORT_FEATURE;
 	dev->net->vlan_features |= AQ_SUPPORT_VLAN_FEATURE;
 
+	netif_set_gso_max_size(dev->net, 65535);
+
 	aqc111_read_fw_version(dev, aqc111_data);
 	aqc111_data->autoneg = AUTONEG_ENABLE;
 	aqc111_data->advertised_speed = (usb_speed == USB_SPEED_SUPER) ?
 					 SPEED_5000 : SPEED_1000;
-	aqc111_data->priv_flags |= AQ_PF_THERMAL;
-	aqc111_data->rx_checksum = 1;
 
 	return 0;
 
@@ -1038,7 +753,6 @@ static void aqc111_unbind(struct usbnet *dev, struct usb_interface *intf)
 {
 	struct aqc111_data *aqc111_data = dev->driver_priv;
 	u16 reg16;
-	u8 reg8;
 
 	/* Force bz */
 	reg16 = SFR_PHYPWR_RSTCTL_BZ;
@@ -1049,17 +763,11 @@ static void aqc111_unbind(struct usbnet *dev, struct usb_interface *intf)
 				2, &reg16);
 
 	/* Power down ethernet PHY */
-	if (aqc111_data->dpa) {
-		reg8 = 0x00;
-		aqc111_write_cmd_nopm(dev, AQ_PHY_POWER, 0,
-				      0, 1, &reg8);
-	} else {
-		aqc111_data->phy_cfg &= ~AQ_ADV_MASK;
-		aqc111_data->phy_cfg |= AQ_LOW_POWER;
-		aqc111_data->phy_cfg &= ~AQ_PHY_POWER_EN;
-		aqc111_write32_cmd_nopm(dev, AQ_PHY_OPS, 0, 0,
-					&aqc111_data->phy_cfg);
-	}
+	aqc111_data->phy_cfg &= ~AQ_ADV_MASK;
+	aqc111_data->phy_cfg |= AQ_LOW_POWER;
+	aqc111_data->phy_cfg &= ~AQ_PHY_POWER_EN;
+	aqc111_write32_cmd_nopm(dev, AQ_PHY_OPS, 0, 0,
+				&aqc111_data->phy_cfg);
 
 	kfree(aqc111_data);
 }
@@ -1123,14 +831,6 @@ static void aqc111_configure_rx(struct usbnet *dev,
 		buf[1] = 0xFB;
 		buf[2] = 0x4;
 		break;
-	}
-
-	if (aqc111_data->dpa) {
-		/* Set Phy Flow control */
-		aqc111_mdio_write(dev, AQ_GLB_ING_PAUSE_CTRL_REG,
-				  AQ_PHY_AUTONEG_ADDR, &reg16);
-		aqc111_mdio_write(dev, AQ_GLB_EGR_PAUSE_CTRL_REG,
-				  AQ_PHY_AUTONEG_ADDR, &reg16);
 	}
 
 	aqc111_write_cmd(dev, AQ_ACCESS_MAC, SFR_INTER_PACKET_GAP_0,
@@ -1289,15 +989,12 @@ static int aqc111_link_reset(struct usbnet *dev)
 static int aqc111_reset(struct usbnet *dev)
 {
 	struct aqc111_data *aqc111_data = dev->driver_priv;
-	u16 reg16 = 0;
 	u8 reg8 = 0;
 
 	dev->rx_urb_size = URB_SIZE;
 
-#if KERNEL_VERSION(3, 12, 0) <= LINUX_VERSION_CODE || (RHEL_RELEASE_CODE)
 	if (usb_device_no_sg_constraint(dev->udev))
 		dev->can_dma_sg = 1;
-#endif
 
 	dev->net->hw_features |= AQ_SUPPORT_HW_FEATURE;
 	dev->net->features |= AQ_SUPPORT_FEATURE;
@@ -1305,25 +1002,8 @@ static int aqc111_reset(struct usbnet *dev)
 
 	/* Power up ethernet PHY */
 	aqc111_data->phy_cfg = AQ_PHY_POWER_EN;
-	if (aqc111_data->dpa) {
-		aqc111_read_cmd(dev, AQ_PHY_POWER, 0, 0, 1, &reg8);
-		if (reg8 == 0x00) {
-			reg8 = 0x02;
-			aqc111_write_cmd(dev, AQ_PHY_POWER, 0, 0, 1, &reg8);
-			msleep(200);
-		}
-
-		aqc111_mdio_read(dev, AQ_GLB_STD_CTRL_REG, AQ_PHY_GLOBAL_ADDR,
-				 &reg16);
-		if (reg16 & AQ_PHY_LOW_POWER_MODE) {
-			reg16 &= ~AQ_PHY_LOW_POWER_MODE;
-			aqc111_mdio_write(dev, AQ_GLB_STD_CTRL_REG,
-					  AQ_PHY_GLOBAL_ADDR, &reg16);
-		}
-	} else {
-		aqc111_write32_cmd(dev, AQ_PHY_OPS, 0, 0,
-				   &aqc111_data->phy_cfg);
-	}
+	aqc111_write32_cmd(dev, AQ_PHY_OPS, 0, 0,
+			   &aqc111_data->phy_cfg);
 
 	/* Set the MAC address */
 	aqc111_write_cmd(dev, AQ_ACCESS_MAC, SFR_NODE_ID, ETH_ALEN,
@@ -1342,8 +1022,6 @@ static int aqc111_reset(struct usbnet *dev)
 	aqc111_write_cmd(dev, AQ_ACCESS_MAC, SFR_MONITOR_MODE, 1, 1, &reg8);
 
 	netif_carrier_off(dev->net);
-
-	aqc111_update_thermal_params(dev);
 
 	/* Phy advertise */
 	aqc111_set_phy_speed(dev, aqc111_data->autoneg,
@@ -1366,31 +1044,25 @@ static int aqc111_stop(struct usbnet *dev)
 	aqc111_write16_cmd(dev, AQ_ACCESS_MAC, SFR_RX_CTL, 2, &reg16);
 
 	/* Put PHY to low power*/
-	if (aqc111_data->dpa) {
-		reg16 = AQ_PHY_LOW_POWER_MODE;
-		aqc111_mdio_write(dev, AQ_GLB_STD_CTRL_REG, AQ_PHY_GLOBAL_ADDR,
-				  &reg16);
-	} else {
-		aqc111_data->phy_cfg |= AQ_LOW_POWER;
-		aqc111_write32_cmd(dev, AQ_PHY_OPS, 0, 0,
-				   &aqc111_data->phy_cfg);
-	}
+	aqc111_data->phy_cfg |= AQ_LOW_POWER;
+	aqc111_write32_cmd(dev, AQ_PHY_OPS, 0, 0,
+			   &aqc111_data->phy_cfg);
 
 	netif_carrier_off(dev->net);
 
 	return 0;
 }
 
-static void aqc111_rx_checksum(struct sk_buff *skb, u64 *pkt_desc)
+static void aqc111_rx_checksum(struct sk_buff *skb, u64 pkt_desc)
 {
 	u32 pkt_type = 0;
 
 	skb->ip_summed = CHECKSUM_NONE;
 	/* checksum error bit is set */
-	if (*pkt_desc & AQ_RX_PD_L4_ERR || *pkt_desc & AQ_RX_PD_L3_ERR)
+	if (pkt_desc & AQ_RX_PD_L4_ERR || pkt_desc & AQ_RX_PD_L3_ERR)
 		return;
 
-	pkt_type = *pkt_desc & AQ_RX_PD_L4_TYPE_MASK;
+	pkt_type = pkt_desc & AQ_RX_PD_L4_TYPE_MASK;
 	/* It must be a TCP or UDP packet with a valid checksum */
 	if (pkt_type == AQ_RX_PD_L4_TCP || pkt_type == AQ_RX_PD_L4_UDP)
 		skb->ip_summed = CHECKSUM_UNNECESSARY;
@@ -1401,8 +1073,8 @@ static int aqc111_rx_fixup(struct usbnet *dev, struct sk_buff *skb)
 	struct aqc111_data *aqc111_data = dev->driver_priv;
 	struct sk_buff *new_skb = NULL;
 	u32 pkt_total_offset = 0;
+	u64 *pkt_desc_ptr = NULL;
 	u32 start_of_descs = 0;
-	u64 *pkt_desc = NULL;
 	u32 desc_offset = 0; /*RX Header Offset*/
 	u16 pkt_count = 0;
 	u64 desc_hdr = 0;
@@ -1418,8 +1090,7 @@ static int aqc111_rx_fixup(struct usbnet *dev, struct sk_buff *skb)
 	skb_len = skb->len;
 	/* RX Descriptor Header */
 	skb_trim(skb, skb->len - sizeof(desc_hdr));
-	desc_hdr = *(u64 *)skb_tail_pointer(skb);
-	le64_to_cpus(&desc_hdr);
+	desc_hdr = le64_to_cpup((u64 *)skb_tail_pointer(skb));
 
 	/* Check these packets */
 	desc_offset = (desc_hdr & AQ_RX_DH_DESC_OFFSET_MASK) >>
@@ -1439,14 +1110,14 @@ static int aqc111_rx_fixup(struct usbnet *dev, struct sk_buff *skb)
 		goto err;
 
 	/* Get the first RX packet descriptor */
-	pkt_desc = (u64 *)(skb->data + desc_offset);
+	pkt_desc_ptr = (u64 *)(skb->data + desc_offset);
 
 	while (pkt_count--) {
-		u32 pkt_len = 0;
+		u64 pkt_desc = le64_to_cpup(pkt_desc_ptr);
 		u32 pkt_len_with_padd = 0;
+		u32 pkt_len = 0;
 
-		le64_to_cpus(pkt_desc);
-		pkt_len = (u32)((*pkt_desc & AQ_RX_PD_LEN_MASK) >>
+		pkt_len = (u32)((pkt_desc & AQ_RX_PD_LEN_MASK) >>
 			  AQ_RX_PD_LEN_SHIFT);
 		pkt_len_with_padd = ((pkt_len + 7) & 0x7FFF8);
 
@@ -1456,25 +1127,31 @@ static int aqc111_rx_fixup(struct usbnet *dev, struct sk_buff *skb)
 			goto err;
 		}
 
-		if (*pkt_desc & AQ_RX_PD_DROP ||
-		    !(*pkt_desc & AQ_RX_PD_RX_OK) ||
-		    pkt_len > (dev->hard_mtu + AQ_RX_HW_PAD))
-			goto next_desc;
+		if (pkt_desc & AQ_RX_PD_DROP ||
+		    !(pkt_desc & AQ_RX_PD_RX_OK) ||
+		    pkt_len > (dev->hard_mtu + AQ_RX_HW_PAD)) {
+			skb_pull(skb, pkt_len_with_padd);
+			/* Next RX Packet Descriptor */
+			pkt_desc_ptr++;
+			continue;
+		}
 
-		new_skb = netdev_alloc_skb_ip_align(dev->net, pkt_len);
+		/* Clone SKB */
+		new_skb = skb_clone(skb, GFP_ATOMIC);
 
 		if (!new_skb)
 			goto err;
 
-		skb_put_data(new_skb, skb->data, pkt_len);
+		new_skb->len = pkt_len;
 		skb_pull(new_skb, AQ_RX_HW_PAD);
+		skb_set_tail_pointer(new_skb, new_skb->len);
 
 		new_skb->truesize = SKB_TRUESIZE(new_skb->len);
 		if (aqc111_data->rx_checksum)
 			aqc111_rx_checksum(new_skb, pkt_desc);
 
-		if (*pkt_desc & AQ_RX_PD_VLAN) {
-			vlan_tag = *pkt_desc >> AQ_RX_PD_VLAN_SHIFT;
+		if (pkt_desc & AQ_RX_PD_VLAN) {
+			vlan_tag = pkt_desc >> AQ_RX_PD_VLAN_SHIFT;
 			__vlan_hwaccel_put_tag(new_skb, htons(ETH_P_8021Q),
 					       vlan_tag & VLAN_VID_MASK);
 		}
@@ -1483,11 +1160,10 @@ static int aqc111_rx_fixup(struct usbnet *dev, struct sk_buff *skb)
 		if (pkt_count == 0)
 			break;
 
-next_desc:
 		skb_pull(skb, pkt_len_with_padd);
 
-		/* Next RX Packet Descriptor */
-		pkt_desc++;
+		/* Next RX Packet Header */
+		pkt_desc_ptr++;
 
 		new_skb = NULL;
 	}
@@ -1503,6 +1179,7 @@ static struct sk_buff *aqc111_tx_fixup(struct usbnet *dev, struct sk_buff *skb,
 {
 	int frame_size = dev->maxpacket;
 	struct sk_buff *new_skb = NULL;
+	u64 *tx_desc_ptr = NULL;
 	int padding_size = 0;
 	int headroom = 0;
 	int tailroom = 0;
@@ -1532,11 +1209,7 @@ static struct sk_buff *aqc111_tx_fixup(struct usbnet *dev, struct sk_buff *skb,
 			   AQ_TX_DESC_VLAN_SHIFT;
 	}
 
-	if (
-#if KERNEL_VERSION(3, 12, 0) <= LINUX_VERSION_CODE || (RHEL_RELEASE_CODE)
-	    !dev->can_dma_sg &&
-#endif
-	    (dev->net->features & NETIF_F_SG) &&
+	if (!dev->can_dma_sg && (dev->net->features & NETIF_F_SG) &&
 	    skb_linearize(skb))
 		return NULL;
 
@@ -1552,11 +1225,10 @@ static struct sk_buff *aqc111_tx_fixup(struct usbnet *dev, struct sk_buff *skb,
 			return NULL;
 	}
 	if (padding_size != 0)
-		skb_put(skb, padding_size);
+		skb_put_zero(skb, padding_size);
 	/* Copy TX header */
-	skb_push(skb, sizeof(tx_desc));
-	cpu_to_le64s(&tx_desc);
-	skb_copy_to_linear_data(skb, &tx_desc, sizeof(tx_desc));
+	tx_desc_ptr = skb_push(skb, sizeof(tx_desc));
+	*tx_desc_ptr = cpu_to_le64(tx_desc);
 
 	usbnet_set_skb_tx_stats(skb, 1, 0);
 
@@ -1679,19 +1351,13 @@ static int aqc111_suspend(struct usb_interface *intf, pm_message_t message)
 			      1, 1, &reg8);
 
 	if (aqc111_data->wol_flags) {
-		struct aqc111_wol_cfg wol_cfg = { 0 };
+		struct aqc111_wol_cfg wol_cfg;
+
+		memset(&wol_cfg, 0, sizeof(struct aqc111_wol_cfg));
 
 		aqc111_data->phy_cfg |= AQ_WOL;
-		if (aqc111_data->dpa) {
-			reg8 = 0;
-			if (aqc111_data->wol_flags & AQ_WOL_FLAG_MP)
-				reg8 |= SFR_MONITOR_MODE_RWMP;
-			aqc111_write_cmd_nopm(dev, AQ_ACCESS_MAC,
-					      SFR_MONITOR_MODE, 1, 1, &reg8);
-		} else {
-			ether_addr_copy(wol_cfg.hw_addr, dev->net->dev_addr);
-			wol_cfg.flags = aqc111_data->wol_flags;
-		}
+		ether_addr_copy(wol_cfg.hw_addr, dev->net->dev_addr);
+		wol_cfg.flags = aqc111_data->wol_flags;
 
 		temp_rx_ctrl |= (SFR_RX_CTL_AB | SFR_RX_CTL_START);
 		aqc111_write16_cmd_nopm(dev, AQ_ACCESS_MAC, SFR_RX_CTL,
@@ -1725,24 +1391,14 @@ static int aqc111_suspend(struct usb_interface *intf, pm_message_t message)
 		aqc111_write16_cmd_nopm(dev, AQ_ACCESS_MAC,
 					SFR_MEDIUM_STATUS_MODE, 2, &reg16);
 
-		if (aqc111_data->dpa) {
-			aqc111_set_phy_speed(dev, AUTONEG_ENABLE, SPEED_100);
-		} else {
-			aqc111_write_cmd(dev, AQ_WOL_CFG, 0, 0,
-					 WOL_CFG_SIZE, &wol_cfg);
-			aqc111_write32_cmd(dev, AQ_PHY_OPS, 0, 0,
-					   &aqc111_data->phy_cfg);
-		}
+		aqc111_write_cmd(dev, AQ_WOL_CFG, 0, 0,
+				 WOL_CFG_SIZE, &wol_cfg);
+		aqc111_write32_cmd(dev, AQ_PHY_OPS, 0, 0,
+				   &aqc111_data->phy_cfg);
 	} else {
 		aqc111_data->phy_cfg |= AQ_LOW_POWER;
-		if (!aqc111_data->dpa) {
-			aqc111_write32_cmd(dev, AQ_PHY_OPS, 0, 0,
-					   &aqc111_data->phy_cfg);
-		} else {
-			reg16 = AQ_PHY_LOW_POWER_MODE;
-			aqc111_mdio_write(dev, AQ_GLB_STD_CTRL_REG,
-					  AQ_PHY_GLOBAL_ADDR, &reg16);
-		}
+		aqc111_write32_cmd(dev, AQ_PHY_OPS, 0, 0,
+				   &aqc111_data->phy_cfg);
 
 		/* Disable RX path */
 		aqc111_read16_cmd_nopm(dev, AQ_ACCESS_MAC,
@@ -1768,23 +1424,6 @@ static int aqc111_resume(struct usb_interface *intf)
 	aqc111_data->phy_cfg |= AQ_PHY_POWER_EN;
 	aqc111_data->phy_cfg &= ~AQ_LOW_POWER;
 	aqc111_data->phy_cfg &= ~AQ_WOL;
-	if (aqc111_data->dpa) {
-		aqc111_read_cmd_nopm(dev, AQ_PHY_POWER, 0, 0, 1, &reg8);
-		if (reg8 == 0x00) {
-			reg8 = 0x02;
-			aqc111_write_cmd_nopm(dev, AQ_PHY_POWER, 0, 0,
-					      1, &reg8);
-			msleep(200);
-		}
-
-		aqc111_mdio_read(dev, AQ_GLB_STD_CTRL_REG, AQ_PHY_GLOBAL_ADDR,
-				 &reg16);
-		if (reg16 & AQ_PHY_LOW_POWER_MODE) {
-			reg16 &= ~AQ_PHY_LOW_POWER_MODE;
-			aqc111_mdio_write(dev, AQ_GLB_STD_CTRL_REG,
-					  AQ_PHY_GLOBAL_ADDR, &reg16);
-		}
-	}
 
 	reg8 = 0xFF;
 	aqc111_write_cmd_nopm(dev, AQ_ACCESS_MAC, SFR_BM_INT_MASK,
