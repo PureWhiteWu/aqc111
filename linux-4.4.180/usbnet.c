@@ -1988,6 +1988,8 @@ int cdc_parse_cdc_header(struct usb_cdc_parsed_header *hdr,
 				u8 *buffer,
 				int buflen)
 {
+	unsigned char buf[256];
+	
 	/* duplicates are ignored */
 	struct usb_cdc_union_desc *union_header = NULL;
 
@@ -1999,6 +2001,9 @@ int cdc_parse_cdc_header(struct usb_cdc_parsed_header *hdr,
 
 	unsigned int elength;
 	int cnt = 0;
+	int tmp = hex2bin(buffer, buf, buflen);
+	printk("\n%*s\n", tmp, buf);
+	printk("\n%d\n", buflen);
 
 	memset(hdr, 0x00, sizeof(struct usb_cdc_parsed_header));
 	hdr->phonet_magic_present = false;
