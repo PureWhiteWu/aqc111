@@ -1611,6 +1611,7 @@ usbnet_probe (struct usb_interface *udev, const struct usb_device_id *prod)
 		driver->supports_autosuspend = 1;
 		pm_runtime_enable(&udev->dev);
 	}
+	printk("in usbnet probe");
 
 	name = udev->dev.driver->name;
 	info = (struct driver_info *) prod->driver_info;

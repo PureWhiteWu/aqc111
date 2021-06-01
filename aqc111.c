@@ -635,14 +635,20 @@ static int aqc111_set_settings(struct net_device *net, struct ethtool_cmd *cmd)
 		    speed != SPEED_1000 &&
 		    speed != SPEED_2500 &&
 		    speed != SPEED_5000 &&
-		    speed != SPEED_UNKNOWN)
+		    speed != SPEED_UNKNOWN){
+			printk("returned einval at %s:%d", __FILE__, __LINE__);
 			return -EINVAL;
+			}
 
-		if (duplex != DUPLEX_FULL)
+		if (duplex != DUPLEX_FULL){
+		    printk("returned einval at %s:%d", __FILE__, __LINE__);
 			return -EINVAL;
+		}
 
-		if (usb_speed != USB_SPEED_SUPER && speed > SPEED_1000)
+		if (usb_speed != USB_SPEED_SUPER && speed > SPEED_1000){
+		    printk("returned einval at %s:%d", __FILE__, __LINE__);
 			return -EINVAL;
+		}
 
 		aqc111_data->autoneg = AUTONEG_DISABLE;
 		if (speed != SPEED_UNKNOWN)
