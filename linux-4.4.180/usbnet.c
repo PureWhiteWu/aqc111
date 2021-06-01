@@ -100,6 +100,7 @@ int usbnet_get_endpoints(struct usbnet *dev, struct usb_interface *intf)
 	struct usb_host_endpoint	*in = NULL, *out = NULL;
 	struct usb_host_endpoint	*status = NULL;
 
+    printk("20");
 	for (tmp = 0; tmp < intf->num_altsetting; tmp++) {
 		unsigned	ep;
 
@@ -140,7 +141,10 @@ int usbnet_get_endpoints(struct usbnet *dev, struct usb_interface *intf)
 			break;
 	}
 	if (!alt || !in || !out)
+	{
+		printk("21");
 		return -EINVAL;
+	}
 
 	if (alt->desc.bAlternateSetting != 0 ||
 	    !(dev->driver_info->flags & FLAG_NO_SETINT)) {
@@ -1624,6 +1628,7 @@ usbnet_probe (struct usb_interface *udev, const struct usb_device_id *prod)
 
 	status = -ENOMEM;
 
+    printk("1");
 	// set up our own records
 	net = alloc_etherdev(sizeof(*dev));
 	if (!net)
@@ -1668,13 +1673,16 @@ usbnet_probe (struct usb_interface *udev, const struct usb_device_id *prod)
 	net->watchdog_timeo = TX_TIMEOUT_JIFFIES;
 	net->ethtool_ops = &usbnet_ethtool_ops;
 
+    printk("2");
 	// allow device-specific bind/init procedures
 	// NOTE net->name still not usable ...
 	if (info->bind) {
+		printk("3");
 		status = info->bind (dev, udev);
 		if (status < 0)
 			goto out1;
 
+        printk("4");
 		// heuristic:  "usb%d" for links we know are two-host,
 		// else "eth%d" when there's reasonable doubt.  userspace
 		// can rename the link if it knows better.
@@ -1696,9 +1704,13 @@ usbnet_probe (struct usb_interface *udev, const struct usb_device_id *prod)
 		/* maybe the remote can't receive an Ethernet MTU */
 		if (net->mtu > (dev->hard_mtu - net->hard_header_len))
 			net->mtu = dev->hard_mtu - net->hard_header_len;
-	} else if (!info->in || !info->out)
-		status = usbnet_get_endpoints (dev, udev);
+	} else if (!info->in || !info->out){
+status = usbnet_get_endpoints (dev, udev);
+    printk("5");
+	}
+		
 	else {
+		printk("6");
 		dev->in = usb_rcvbulkpipe (xdev, info->in);
 		dev->out = usb_sndbulkpipe (xdev, info->out);
 		if (!(info->flags & FLAG_NO_SETINT))
@@ -1709,11 +1721,13 @@ usbnet_probe (struct usb_interface *udev, const struct usb_device_id *prod)
 			status = 0;
 
 	}
+	printk("7");
 	if (status >= 0 && dev->status)
 		status = init_status (dev, udev);
 	if (status < 0)
 		goto out3;
 
+    printk("8");
 	if (!dev->rx_urb_size)
 		dev->rx_urb_size = dev->hard_mtu;
 	dev->maxpacket = usb_maxpacket (dev->udev, dev->out, 1);
@@ -1732,6 +1746,7 @@ usbnet_probe (struct usb_interface *udev, const struct usb_device_id *prod)
 
 	if (dev->can_dma_sg && !(info->flags & FLAG_SEND_ZLP) &&
 		!(info->flags & FLAG_MULTI_PACKET)) {
+			printk("9");
 		dev->padding_pkt = kzalloc(1, GFP_KERNEL);
 		if (!dev->padding_pkt) {
 			status = -ENOMEM;
@@ -1740,8 +1755,10 @@ usbnet_probe (struct usb_interface *udev, const struct usb_device_id *prod)
 	}
 
 	status = register_netdev (net);
+	printk("10");
 	if (status)
 		goto out5;
+		printk("11");
 	netif_info(dev, probe, dev->net,
 		   "register '%s' at usb-%s-%s, %s, %pM\n",
 		   udev->dev.driver->name,
@@ -1757,6 +1774,7 @@ usbnet_probe (struct usb_interface *udev, const struct usb_device_id *prod)
 	if (dev->driver_info->flags & FLAG_LINK_INTR)
 		usbnet_link_change(dev, 0, 0);
 
+    printk("12");
 	return 0;
 
 out5:
